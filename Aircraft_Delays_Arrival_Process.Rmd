@@ -1,0 +1,662 @@
+---
+title: "Project new - modeling arrival"
+author: "Tracy Chen"
+date: "2023-11-22"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+rm(list=ls(all=TRUE))
+
+library(tidyverse)
+library(dplyr)
+library(ggplot2)
+library(fastDummies)
+library(faraway)
+
+# root mean squared error
+rmse <- function(x,y) sqrt(mean((x-y)^2))
+
+# mean absolute error
+# measure of how far the predictions were from the actual output
+mae <- function(x,y) mean(abs(y-x))
+
+# set up empty data frame to store model evaluation results
+mod.eval <- data.frame(model = character(),
+                       rmse.train = numeric(),
+                       mae.train = numeric(),
+                       rmse.test = numeric(),
+                       mae.test = numeric(),
+                       stringsAsFactors = FALSE)
+```
+
+# load & set up data
+* only run this once to generate the dat file for analysis unless we need to restructure the data
+``` {r }
+# dat <- read.csv("arrival.csv", header = TRUE)
+# 
+# dat$holiday <- ifelse((dat$MONTH == 1 & (dat$DAY_OF_MONTH == 1 | dat$DAY_OF_MONTH == 17)) |
+#                         (dat$MONTH == 2 & dat$DAY_OF_MONTH == 21) |
+#                         (dat$MONTH == 5 & dat$DAY_OF_MONTH == 30) |
+#                         (dat$MONTH == 6 & (dat$DAY_OF_MONTH == 19 | dat$DAY_OF_MONTH == 20)) |
+#                         (dat$MONTH == 7 & dat$DAY_OF_MONTH == 4) |
+#                         (dat$MONTH == 9 & dat$DAY_OF_MONTH == 5) |
+#                         (dat$MONTH == 10 & dat$DAY_OF_MONTH == 10) |
+#                         (dat$MONTH == 11 & (dat$DAY_OF_MONTH == 11 | dat$DAY_OF_MONTH == 23)) |
+#                         (dat$MONTH == 12 & (dat$DAY_OF_MONTH == 25 | dat$DAY_OF_MONTH == 26))
+#                         , 1, 0)
+# 
+# breaks <- c(-Inf,5,12,17,22,Inf)
+# labels <- c("Night","Morning","Afternoon","Evening","Night")
+# dat$sch_dep_interval <- cut(dat$CRS_DEP_TIME, breaks=breaks, labels=labels, include.lowest = TRUE)
+# dat$sch_arr_interval <- cut(dat$CRS_ARR_TIME, breaks=breaks, labels=labels, include.lowest = TRUE)
+# 
+# dat$weekend <- ifelse(dat$DAY_OF_WEEK=="Fri." | dat$DAY_OF_WEEK=="Sat." | dat$DAY_OF_WEEK=="Sun.", 1, 0)
+# 
+# dat <- dat %>% select(-DAY_OF_MONTH)
+# 
+# dat$CRS_DEP_TIME <- factor(dat$CRS_DEP_TIME)
+# dat$CRS_ARR_TIME <- factor(dat$CRS_ARR_TIME)
+# dat$CostClass <- factor(dat$CostClass)
+# 
+# # if the TLC, snow fall, or snow depth is T (trace), we assign it as 0.01 (in)
+# dat <- dat %>%
+#   mutate(origin_TLC = ifelse(origin_TLC == "T", 0.01, origin_TLC)) %>%
+#   mutate(origin_snow.fall = ifelse(origin_snow.fall == "T", 0.01, origin_snow.fall)) %>%
+#   mutate(origin_snow.depth = ifelse(origin_snow.depth == "T", 0.01, origin_snow.depth)) %>%
+#   mutate(dest_TLC = ifelse(dest_TLC == "T", 0.01, dest_TLC)) %>%
+#   mutate(dest_snow.fall = ifelse(dest_snow.fall == "T", 0.01, dest_snow.fall)) %>%
+#   mutate(dest_snow.depth = ifelse(dest_snow.depth == "T", 0.01, dest_snow.depth))
+# 
+# dat <- dat %>%
+#   mutate_at(1:5, as.factor) %>%
+#   mutate_at(7, as.numeric) %>%
+#   mutate_at(9:11, as.numeric) %>%
+#   mutate_at(13:20, as.numeric) %>%
+#   mutate_at(24:37, as.factor) %>%
+#   mutate_at(38:45, as.numeric) %>%
+#   mutate_at(49:66, as.factor)
+# 
+# # EDA
+# summary(dat)
+# 
+# # from EDA, we know some weather conditions never occurred for our data sample, so we remove it for our model
+# dat <- dat %>%
+#   select(-c(origin_glaze,origin_high.wind,origin_spray,origin_mist,dest_glaze,dest_high.wind,dest_spray,dest_mist))
+# 
+# # remove rows with NA from data
+# dat <- na.omit(dat)
+# 
+# # Redo EDA
+# summary(dat)
+# 
+# # boxplot for cost class vs arrival delay
+# p1 <- ggplot(dat, aes(x=ARR_DELAY_NEW)) +
+#   geom_boxplot() +
+#   labs(title = "Arrival Delay by Cost Class",
+#        x = "Arrival Delay (minutes)") +
+#   theme(axis.text.y = element_blank(), axis.ticks.y = element_blank(), axis.title.y = element_blank()) +
+#   facet_grid(CostClass ~ .) +
+#   theme_minimal()
+# 
+# ggsave("boxplot_eda1.png",p1, width = 6, height = 4)
+# 
+# # from box plot we observe there's a lot of outliers
+# # remove data for where the flight is delayed by over 6 hours
+# # we chose 6 because airlines are legally require to compensate passengers after 3 hours of delay
+# # after 6 hours, flights tends to get canceled rather than getting it delayed even further due to cost and crews timing out of their max duty hours
+# dat <- dat %>%
+#   filter(!(dat$ARR_DELAY_NEW > 6*60))
+# 
+# # save as rds file so that we don't need to reprocess the data every time
+# saveRDS(dat, file="arrival.Rda")
+```
+* Next we'll build our model to predict **ARRIVAL DELAY**
+* For predicting **DEPARTURE DELAY**, a separate R file following similar logic will be used so that we don't overload R's memory 
+
+# Modeling - with original data
+## Set up training/ testing set
+``` {r }
+dat <- readRDS(file="arrival.Rda")
+
+set.seed(100)
+
+# due to size of our data and limitation of our computing device, we sampled 10% of our data (~71k observations vs ~720k observations)
+n <- nrow(dat)/10
+dat <- dat[sample(nrow(dat), n, replace=TRUE), ]
+
+# drop unused response variable
+n <- which(names(dat)=="DEP_DELAY_NEW")
+dat <- dat[,-n]
+
+# standardize the numeric predictor data
+dat.new <- dat %>%
+  mutate_at(vars(-ARR_DELAY_NEW), ~ifelse(is.numeric(.), scale(.), .))
+
+# random sample half of indices
+training.idx <- sample(1:nrow(dat), size = nrow(dat)/2)
+testing.idx <- setdiff(1:nrow(dat), training.idx)
+
+# get the training and testing set using set of random indices
+training <- dat[training.idx, , drop=FALSE]
+testing <- dat[testing.idx, , drop=FALSE]
+
+# NOTE: to get a new set of training and testing data, change the random seed
+```
+* Now we have the X design matrix and Y response variable 
+
+## Oridinary least squares
+``` {r }
+# build simple OLS model
+mod.ols <- lm(ARR_DELAY_NEW ~ ., data = training)
+summary(mod.ols)
+```
+
+``` {r }
+# some regression coefficients are NA, which means there's collinearity between some variables 
+# taking a closer look, the variables that return NA are: cost class, schedule departure interval, schedule arrival interval, and weekend
+# this make sense as these variables were generated after reclassification of existing variables 
+# to simplify the model, we choose to remove the original variables that were used to generate these new categories as they are smaller and can reduce the number of columns while maintaing the type of classification we intend 
+dat <- dat[, !names(dat) %in% c("OP_UNIQUE_CARRIER","DAY_OF_WEEK","CRS_DEP_TIME","CRS_ARR_TIME")]
+
+# get new training and testing data set
+training <- dat[training.idx, , drop=FALSE]
+testing <- dat[testing.idx, , drop=FALSE]
+```
+
+``` {r }
+# reconstruct OLS model
+mod.ols <- lm(ARR_DELAY_NEW ~ ., data = training)
+summary(mod.ols)
+
+# evaluate performance
+pred.ols <- predict(mod.ols, newdata = testing)
+pred.ols <- exp(pred.ols)
+
+eval <- data.frame(model="OLS.removeNA", 
+                   rmse.train= rmse(pred.ols,training$ARR_DELAY_NEW), 
+                   mae.train= mae(pred.ols,training$ARR_DELAY_NEW),
+                   rmse.test= rmse(pred.ols,testing$ARR_DELAY_NEW), 
+                   mae.test= mae(pred.ols,testing$ARR_DELAY_NEW))
+mod.eval <- rbind(mod.eval, eval)
+```
+
+``` {r }
+# the OLS result is very poor
+# we plot the response variables to take a closer look
+# plot cost class vs arrival delay again 
+p2 <- ggplot(dat, aes(x=ARR_DELAY_NEW)) +
+  geom_boxplot() +
+  labs(title = "Arrival Delay by Cost Class",
+       x = "Arrival Delay (minutes)") +
+  facet_grid(CostClass ~ .) +
+  theme_minimal()
+ggsave("boxplot_ols1.png",p2, width = 6, height = 4)
+
+# we note the data is highly right skewed
+# so we perform box-cox analysis to see what transformation is recommended
+library(MASS)
+boxcox(mod.ols, plotit=T)
+
+# box cox tells us it needs log transformation
+dat$ARR_DELAY_NEW <- log(dat$ARR_DELAY_NEW)
+
+# get new training and testing data set
+training <- dat[training.idx, , drop=FALSE]
+testing <- dat[testing.idx, , drop=FALSE]
+
+# replot the response
+p3 <- ggplot(training, aes(x=ARR_DELAY_NEW)) +
+  geom_boxplot() +
+  labs(title = "Arrival Delay by Cost Class",
+       x = "Log-Transformed Arrival Delay (minutes)") +
+  facet_grid(CostClass ~ .) +
+  theme_minimal()
+ggsave("boxplot_ols2.png",p3, width = 6, height = 4)
+
+# redo model via log transformed predictors
+mod.ols <- lm(ARR_DELAY_NEW ~ ., data = training)
+summary(mod.ols)
+
+# evaluate performance
+pred.ols <- predict(mod.ols, newdata = testing)
+pred.ols <- exp(pred.ols)
+
+eval <- data.frame(model="OLS.logTrans", 
+                   rmse.train= rmse(pred.ols,training$ARR_DELAY_NEW), 
+                   mae.train= mae(pred.ols,training$ARR_DELAY_NEW),
+                   rmse.test= rmse(pred.ols,testing$ARR_DELAY_NEW), 
+                   mae.test= mae(pred.ols,testing$ARR_DELAY_NEW))
+mod.eval <- rbind(mod.eval, eval)
+```
+
+``` {r }
+library(corrplot)
+
+# now we check for multicolinearity 
+
+# get design matrix 
+X <- model.matrix(mod.ols)[,-1]
+
+# remove dummy-coded variable rows
+n <- which(colnames(X)=="ORIGINTPA") + 1
+m <- which(colnames(X)=="holiday1") -1
+X <- X[,n:m]
+
+# VIF
+vif <- round(vif(X), 2)
+vif.off <- which(vif > 10)
+
+# correlation matrix
+corr <- cor(X)
+
+# find variable pairs with high correlation (> 0.7)
+idx <- indices <- which(corr > 0.7 & upper.tri(corr), arr.ind = TRUE)
+corr.off <- data.frame(row = idx[, 1], col = idx[, 2], value = corr[idx])
+
+# interpret results 
+vif.off
+corr.off
+```
+
+``` {r }
+# from interpreting the VIFs and correlation matrix, we identified the following variables that are highly correlated
+# 1) CRS_ELAPSED_TIME & DISTANCE 
+# 2) temp.avg & temp.ADP (for origin and dest)
+# 3) temp.avg & temp.AWB (for origin and dest)
+# 4) temp.ADP & temp.AWB (for origin and dest)
+# item 1 are related as speed = distance / time, so the distance a plane travel is dependent on the time they spend flying
+# so we remove distance 
+# this make sense as item 2-4 are all different ways to measure temperature and there is a natural relationship between temperature to adp and awb
+# adp = Average daily dew point temperature (in whole degrees Fahrenheit)
+# awb = Average daily wet-bulb temperature (in whole degrees Fahrenheit)
+# so we will only keep temp.avg
+
+# update data
+dat <- dat[, !names(dat) %in% c("DISTANCE","origin_temp.ADP","origin_temp.AWB","dest_temp.ADP","dest_temp.AWB")]
+
+# get new training and testing data set
+training <- dat[training.idx, , drop=FALSE]
+testing <- dat[testing.idx, , drop=FALSE]
+
+# update ols 
+mod.ols <- lm(ARR_DELAY_NEW ~ ., data = training)
+summary(mod.ols)
+
+# evaluate performance
+pred.ols <- predict(mod.ols, newdata = testing)
+pred.ols <- exp(pred.ols)
+
+eval <- data.frame(model="OLS.removeCoLin", 
+                   rmse.train= rmse(pred.ols,training$ARR_DELAY_NEW), 
+                   mae.train= mae(pred.ols,training$ARR_DELAY_NEW),
+                   rmse.test= rmse(pred.ols,testing$ARR_DELAY_NEW), 
+                   mae.test= mae(pred.ols,testing$ARR_DELAY_NEW))
+mod.eval <- rbind(mod.eval, eval)
+```
+* Next, we use use the OLS model as a basis and implement different variable selection and shrinkage methods 
+
+## variable selection - AIC and BIC    
+``` {r }
+library(leaps)
+set.seed(100)
+
+# AIC
+mod.AIC <- step(mod.ols)
+
+# BIC
+mod.BIC <- step(mod.ols, k=log(nrow(training)))
+
+# evaluate model against testing data
+pred.AIC <- predict(mod.AIC, newdata=testing)
+pred.AIC <- exp(pred.AIC)
+
+pred.BIC <- predict(mod.BIC, newdata=testing)
+pred.BIC <- exp(pred.BIC)
+
+eval <- data.frame(model="AIC", 
+                   rmse.train= rmse(pred.AIC,training$ARR_DELAY_NEW), 
+                   mae.train= mae(pred.AIC,training$ARR_DELAY_NEW),
+                   rmse.test= rmse(pred.AIC,testing$ARR_DELAY_NEW), 
+                   mae.test= mae(pred.AIC,testing$ARR_DELAY_NEW))
+mod.eval <- rbind(mod.eval, eval)
+
+eval <- data.frame(model="BIC", 
+                   rmse.train= rmse(pred.BIC,training$ARR_DELAY_NEW), 
+                   mae.train= mae(pred.BIC,training$ARR_DELAY_NEW),
+                   rmse.test= rmse(pred.BIC,testing$ARR_DELAY_NEW), 
+                   mae.test= mae(pred.BIC,testing$ARR_DELAY_NEW))
+mod.eval <- rbind(mod.eval, eval)
+```
+
+## shrinkage method
+### partial least sqaures 
+``` {r }
+library(pls)
+set.seed(100)
+
+# fit PLSR model with 10-fold cross validation
+mod.pls <- plsr(ARR_DELAY_NEW ~., ncomp=10, data=training, validation="CV")
+
+# use cross validation to find number of components
+cv.pls <- crossval(mod.pls, segments = 10)
+
+# plot MSEP vs number of components 
+plot(MSEP(cv.pls), legendpos="topright")
+# we indentify that after 8 components, we don't see significant improvement in MSEP
+
+# evaluate data with testing data
+pred.pls <- predict(mod.pls, ncomp = 8, newdata=testing)
+pred.pls <- exp(pred.pls)
+
+eval <- data.frame(model="PLS", 
+                   rmse.train= rmse(pred.pls,training$ARR_DELAY_NEW), 
+                   mae.train= mae(pred.pls,training$ARR_DELAY_NEW),
+                   rmse.test= rmse(pred.pls,testing$ARR_DELAY_NEW), 
+                   mae.test= mae(pred.pls,testing$ARR_DELAY_NEW))
+mod.eval <- rbind(mod.eval, eval)
+```
+
+## Set up design matrix with dummy variables 
+for models that requires dummy coding of the categorical variables 
+``` {r }
+set.seed(100)
+
+# create list of categorical variables that needs to be turn into dummy variables 
+# note the binary variables in the factor() step are already dummy coded, so we don't need to do it agian here
+dummy.list <- c("MONTH","DEST","ORIGIN","CostClass","sch_dep_interval","sch_arr_interval")
+dummy.matrix <- dummy_cols(dat, select_columns = dummy.list, remove_first_dummy = TRUE) # drop one of the categorical variables to avoid multi-collinearity 
+dummy.matrix <- dummy.matrix[,(ncol(dat)+1):ncol(dummy.matrix)]
+
+# get names of remaining columns in dat
+non.dummy <- setdiff(names(dat), dummy.list)
+
+# remove the response variable
+non.dummy <- setdiff(non.dummy, "ARR_DELAY_NEW")
+
+# get remaining columns in data
+predictor.col <- dat[non.dummy]
+
+# form design matrix
+X <- cbind(predictor.col,dummy.matrix)
+
+# form response variable - ARR DELAY
+Y <- dat$ARR_DELAY_NEW
+
+# split X and Y by half into training and testing set
+training.X <- X[training.idx, , drop = FALSE]
+training.Y <- Y[training.idx, drop = FALSE]
+
+testing.X <- X[testing.idx, , drop = FALSE]
+testing.Y <- Y[testing.idx, drop = FALSE]
+
+# convert to matrix
+training.X <- data.matrix(training.X)
+training.Y <- data.matrix(training.Y)
+testing.X <- data.matrix(testing.X)
+testing.Y <- data.matrix(testing.Y)
+
+# remove data no longer needed
+rm(dummy.matrix)
+rm(predictor.col)
+```
+
+## shrinkage method: PCA
+``` {r }
+library(stats)
+set.seed(100)
+
+# implement PCA
+pca <- prcomp(training.X)
+
+# make a scree plot 
+plot(1:10, pca$sdev[1:10], type="l", xlab="PC number", ylab="SD of PC")
+# from screen plot, it suggested 2 PCs 
+
+# fit PCR to 3 PCs
+training.pcr <- as.data.frame(cbind(training.X,training.Y))
+colnames(training.pcr)[ncol(training.pcr)] <- "ARR_DELAY_NEW"
+mod.pcr <- pcr(ARR_DELAY_NEW ~ ., data=training.pcr, ncomp=2)
+
+# apply testing data to pcr model
+testing.pcr <- as.data.frame(cbind(testing.X,testing.Y))
+colnames(testing.pcr)[ncol(testing.pcr)] <- "ARR_DELAY_NEW"
+pred.pcr <- predict(mod.pcr, newdata = testing.pcr)
+pred.pcr <- exp(pred.pcr)
+
+# evaluate model performance
+pcrmse <- RMSEP(mod.pcr, newdata=testing.pcr)
+plot(pcrmse$val[-1], xlab="PC number", ylab="Test RMSE")
+
+eval <- data.frame(model="PCR", 
+                   rmse.train= rmse(pred.pcr,training$ARR_DELAY_NEW), 
+                   mae.train= mae(pred.pcr,training$ARR_DELAY_NEW),
+                   rmse.test= rmse(pred.pcr,testing$ARR_DELAY_NEW), 
+                   mae.test= mae(pred.pcr,testing$ARR_DELAY_NEW))
+mod.eval <- rbind(mod.eval, eval)
+
+
+# since PCA is typically meant for continuous variables whereas our data has a combination of continuous and multi-level categorical variables, the validaity of our pcr result are questionable
+# thus we want to explore another shrinkage method FAMD that can handle both continuous and categorical variables 
+```
+
+## shrinkage method: FAMD
+a principal component method that combines principal component analysis (PCA) for continuous variables and multiple correspondence analysis (MCA) for categorical variables
+``` {r }
+library(FactoMineR)
+library(factoextra)
+# library(missMDA)
+set.seed(100)
+
+# Implement FAMD
+famd <- FAMD(dat, ncp = 30, graph = FALSE)
+
+# cross validation
+# very low 
+# use manual evaluation instead
+# cv.famd <- estim_ncpFAMD(dat, ncp.max=10, method.cv="Kfold")
+
+# plot scree plot 
+fviz_screeplot(famd)
+
+# evaluate eigenvalue
+eig.val <- get_eigenvalue(famd)
+
+# The criteria I used is
+# 1) eigenvalue > 1: the principal component explained more variance than one of the original variables 
+# 2) percentage of explained variance >1%: this is used to help narrow down the number of PCs since we have many principal components that are greater than 1, but only exceed 1 by slight amount 
+eig.val <- eig.val[eig.val[,1]>1 & eig.val[,2]>1, ]
+n <- nrow(eig.val)
+######
+# visualize the contribution of each variable to the chosen principal components
+contrib <- as.data.frame(famd$var$contrib[,1:n])
+contrib$sum <- rowSums(contrib)
+contrib$var <- row.names(contrib)
+contrib$contrib <- contrib$sum/sum(contrib$sum)
+contrib <- contrib[order(-contrib$contrib), ]
+contrib <- contrib[1:10,]
+ggplot(contrib, aes(x=reorder(var,-contrib),y=contrib)) +
+  geom_bar(stat = "identity") + 
+  labs(title = "Contribution of Variables to Dimensions 1-21") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+  
+# we note that the variables "origin" and "destination" has the principal contribution to the dimensions, follow by lesser contribution from "scheduled arrival time", "scheduled departure time", "cost class" and "month"
+
+# obtain the coordinates for the dimensions obtained from FAMD
+# these will be the new data for the regression model 
+famd.dat <- famd$ind$coord[,1:n]
+
+# split into training and testing set 
+n <- which(names(dat)=="ARR_DELAY_NEW")
+training.famd <- as.data.frame(famd.dat[training.idx, , drop=FALSE])
+training.famd$ARR_DELAY_NEW <- dat[training.idx,n]
+testing.famd <- as.data.frame(famd.dat[testing.idx, , drop=FALSE])
+testing.famd$ARR_DELAY_NEW <- dat[testing.idx,n]
+
+# model
+mod.famd <- lm(ARR_DELAY_NEW ~., data=training.famd)
+sumary(mod.famd)
+
+# evaluate performance 
+pred.famd <- predict(mod.famd, newdata = testing.famd)
+pred.famd <- exp(pred.famd)
+
+eval <- data.frame(model="FAMD", 
+                   rmse.train= rmse(pred.famd,training$ARR_DELAY_NEW), 
+                   mae.train= mae(pred.famd,training$ARR_DELAY_NEW),
+                   rmse.test= rmse(pred.famd,testing$ARR_DELAY_NEW), 
+                   mae.test= mae(pred.famd,testing$ARR_DELAY_NEW))
+mod.eval <- rbind(mod.eval, eval)
+```
+
+## Ridge Regression
+``` {r }
+library(glmnet)
+set.seed(100)
+
+# build ridge regression model
+mod.ridge <- glmnet(training.X, training.Y, alpha = 0,lambda=seq(0,5e-8,2.5e-09))
+
+# cross validation
+cv.ridge <- cv.glmnet(training.X, training.Y, type.measure = "mse", nfolds = 10)
+
+# plot cv curve
+plot(cv.ridge)
+
+# obtain lambda
+lambda.ridge <- cv.ridge$lambda.min
+
+# evaluate model on testing data
+pred.ridge <- predict(mod.ridge, testing.X, s=lambda.ridge, mode='fraction')
+pred.ridge <- exp(pred.ridge)
+
+eval <- data.frame(model="Ridge", 
+                   rmse.train= rmse(pred.ridge,training$ARR_DELAY_NEW), 
+                   mae.train= mae(pred.ridge,training$ARR_DELAY_NEW),
+                   rmse.test= rmse(pred.ridge,testing$ARR_DELAY_NEW), 
+                   mae.test= mae(pred.ridge,testing$ARR_DELAY_NEW))
+mod.eval <- rbind(mod.eval, eval)
+```
+
+## Lasso Regression
+``` {r }
+library(lars)
+set.seed(100)
+
+# build lasso regression model 
+mod.lasso <- lars(training.X,training.Y)
+
+# perform 10-fold cross validation 
+cv.lasso <- cv.lars(training.X, training.Y)
+
+# obtain lambda (sum of beta's divided by absolute max of beta's)
+lambda.lasso <- cv.lasso$index[which.min(cv.lasso$cv)]
+
+# evaluate model on testing data
+pred.lasso <- predict(mod.lasso, testing.X, s=lambda.lasso, mode='fraction')
+pred.lasso <- exp(pred.lasso$fit)
+
+eval <- data.frame(model="Lasso", 
+                   rmse.train= rmse(pred.lasso,training$ARR_DELAY_NEW), 
+                   mae.train= mae(pred.lasso,training$ARR_DELAY_NEW),
+                   rmse.test= rmse(pred.lasso,testing$ARR_DELAY_NEW), 
+                   mae.test= mae(pred.lasso,testing$ARR_DELAY_NEW))
+mod.eval <- rbind(mod.eval, eval)
+
+# the caveat to this is that lasso regression could only partially select some of the dummy variables for a single categorical variable
+# to check this we try group lasso and sparse group lasso
+```
+
+## Group Lasso Regression
+* running exceed multiple hours - even with using a very small sample of the data 
+``` {r, eval=FALSE}
+# library(gglasso)
+# set.seed(100)
+# 
+# # due to group lasso taking extremely long for R to run
+# # a reduced sample size was used 
+# 
+# # set up group 
+# n <- which(colnames(training.X)=="dest_snow")
+# group <- c(1:n,
+#            rep(n+1,length(unique(dat$MONTH))-1),
+#            rep(n+2,length(unique(dat$DEST))-1),
+#            rep(n+3,length(unique(dat$ORIGIN))-1),
+#            rep(n+4,length(unique(dat$CostClass))-1),
+#            rep(n+5,length(unique(dat$holiday))-1),
+#            rep(n+6,length(unique(dat$sch_dep_interval))-1),
+#            rep(n+7,length(unique(dat$sch_arr_interval))-1),
+#            rep(n+8,length(unique(dat$weekend))-1))
+# 
+# # build group lasso regression model
+# mod.grouplasso <- gglasso(training.X,training.Y,group=group,loss='ls',lambda=seq(0,5e-8,2.5e-09))
+# 
+# # perform 10-fold cross validation
+# cv.grouplasso <- cv.gglasso(training.X,training.Y,group=group,pred.loss='L1')
+# 
+# # obtain lambda (sum of beta's divided by absolute max of beta's)
+# t.grouplasso <- cv.grouplasso$index[which.min(cv.grouplasso$cv)]
+# 
+# # evaluate model on testing data
+# pred.grouplasso <- predict(mod.grouplasso, testing.X, s=t.grouplasso, mode='fraction')
+# pred.grouplasso <- exp(pred.grouplasso)
+# 
+# eval <- data.frame(model="group.lasso", rmse=rmse(pred.grouplasso,testing$ARR_DELAY_NEW), mae=mae(pred.grouplasso,testing$ARR_DELAY_NEW))
+# mod.eval <- rbind(mod.eval, eval)
+```
+
+## Sparse group lasso regression
+we chose this because it works with grouped dummy-coded categorical variables and accounts for sparsity in predictor variables, which we expect for our data 
+``` {r }
+library(sparsegl)
+set.seed(100)
+
+# set up group 
+n <- which(colnames(training.X)=="dest_snow")
+groups <- c(1:n,
+           rep(n+1,length(unique(dat$MONTH))-1),
+           rep(n+2,length(unique(dat$DEST))-1),
+           rep(n+3,length(unique(dat$ORIGIN))-1),
+           rep(n+4,length(unique(dat$CostClass))-1),
+           rep(n+5,length(unique(dat$holiday))-1),
+           rep(n+6,length(unique(dat$sch_dep_interval))-1),
+           rep(n+7,length(unique(dat$sch_arr_interval))-1),
+           rep(n+8,length(unique(dat$weekend))-1))
+
+# build sparse group lasso model
+mod.sparselasso <- sparsegl(training.X,training.Y,group=groups)
+
+# plot beta hat against sparse group penalty 
+plot(mod.sparselasso, y_axis = "coef", x_axis = "penalty", add_legend = FALSE)
+
+# use cross validation for parameter selection
+cv.sparselasso <- cv.sparsegl(training.X, training.Y, group=groups, nfolds=10)
+
+# plot cv estimate of out of sample error vs different lambdas
+plot(cv.sparselasso)
+
+# obtain lambda
+lambda.sparselasso <- cv.sparselasso$lambda.min
+
+# evaluate model on testing data
+pred.sparselasso <- predict(mod.sparselasso, testing.X, s=lambda.sparselasso)
+pred.sparselasso <- exp(pred.sparselasso)
+
+eval <- data.frame(model="SparseLasso", 
+                   rmse.train= rmse(pred.sparselasso,training$ARR_DELAY_NEW), 
+                   mae.train= mae(pred.sparselasso,training$ARR_DELAY_NEW),
+                   rmse.test= rmse(pred.sparselasso,testing$ARR_DELAY_NEW), 
+                   mae.test= mae(pred.sparselasso,testing$ARR_DELAY_NEW))
+mod.eval <- rbind(mod.eval, eval)
+```
+
+## sources
+https://cran.r-project.org/web/packages/pls/vignettes/pls-manual.pdf
+https://www.rdocumentation.org/packages/FactoMineR/versions/2.9/topics/FAMD
+https://arrow.tudublin.ie/cgi/viewcontent.cgi?article=1227&context=scschcomdis
+course textbook
+course lecture slides
+https://arxiv.org/pdf/2208.02942.pdf 
+https://glmnet.stanford.edu/articles/glmnet.html 

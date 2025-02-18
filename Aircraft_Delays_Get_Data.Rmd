@@ -1,0 +1,141 @@
+---
+title: "Project new - get data"
+author: "Tracy Chen"
+date: "2023-11-22"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+rm(list=ls(all=TRUE))
+```
+
+``` {r, include=FALSE}
+library(tidyverse)
+library(dplyr)
+library(openxlsx)
+```
+
+# load & organize weather data
+``` {r }
+# load weather data
+weather.list <- list.files(path = 'C:/Users/chuoxi/OneDrive/Desktop/UM Fall 2023/IOE 591/Project new/weather', pattern = "*.xlsx",full.names = TRUE)
+weather.df <- lapply(as.list(weather.list), function(x) readWorkbook(x))
+
+# remove data that doesn't make sense for our context
+remove <- c("temp.max","temp.min","degree.heat","degree.cool","peak.speed","peak.dir","sust.speed","sust.dir") 
+weather.df <- lapply(weather.df, function(df) {
+  df[, !colnames(df) %in% remove, drop = FALSE]
+})
+
+airport <- sapply(strsplit(basename(weather.list), " "), function(x) x[3])
+airport <- sapply(strsplit(airport, "\\."), function(x) x[1])
+names(weather.df) <- airport
+
+weather.df <- lapply(names(weather.df), function(x) {
+  df <- weather.df[[x]]
+  df <- transform(df, airport = x)
+  return(df)
+})
+
+weather <- do.call(rbind, weather.df)
+
+# remove un-needed data to save memory
+rm(weather.df)
+rm(weather.list)
+rm(remove)
+```
+
+``` {r }
+# fog = FG,FG+,MIFG,FZFG
+# thunder = TS
+# pellets = PL
+# hail = GR
+# glaze = GL
+# dust.ash = DU
+# smoke = HZ
+# tornado = FC
+# high.wind = WIND
+# spray = BLPY
+# drizzle = DZ, FZDZ
+# rain = RA, FZRA
+# snow = SN, BLSN
+# mist = MS
+weather <- weather %>%
+  mutate(fog = ifelse(grepl("FG", weather), 1, 0)) %>%
+  mutate(thunder = ifelse(grepl("TS", weather), 1, 0)) %>%
+  mutate(pellet = ifelse(grepl("PL", weather), 1, 0)) %>%
+  mutate(hail = ifelse(grepl("GR", weather), 1, 0)) %>%
+  mutate(glaze = ifelse(grepl("GL", weather), 1, 0)) %>%
+  mutate(dust = ifelse(grepl("DU", weather), 1, 0)) %>%
+  mutate(smoke = ifelse(grepl("HZ", weather), 1, 0)) %>%
+  mutate(tornado = ifelse(grepl("FC", weather), 1, 0)) %>%
+  mutate(high.wind = ifelse(grepl("WIND", weather), 1, 0)) %>%
+  mutate(spray = ifelse(grepl("BLPY", weather), 1, 0)) %>%
+  mutate(drizzle = ifelse(grepl("DZ", weather), 1, 0)) %>%
+  mutate(rain = ifelse(grepl("RA", weather), 1, 0)) %>%
+  mutate(snow = ifelse(grepl("SN", weather), 1, 0)) %>%
+  mutate(mist = ifelse(grepl("MS", weather), 1, 0)) %>%
+  select(-weather)
+```
+
+# load & organize flight data
+``` {r }
+# load flight data
+flight.list <- list.files(path = 'C:/Users/chuoxi/OneDrive/Desktop/UM Fall 2023/IOE 591/Project new/flight', pattern = "*.csv",full.names = TRUE)
+flight.df <- lapply(as.list(flight.list), function(x) read.csv(x))
+flight <- sapply(strsplit(basename(flight.list), "\\."), function(x) x[1])
+names(flight.df) <- flight
+list2env(flight.df, env = .GlobalEnv)
+
+# remove un-needed data to save memory
+rm(flight.df)
+rm(flight.list)
+```
+
+``` {r }
+arrival <- rbind(flightArrJan,flightArrFeb,flightArrMar,flightArrApr,flightArrMay,flightArrJun,flightArrJul,flightArrAug,flightArrSep,flightArrOct,flightArrNov,flightArrDec)
+rm(flightArrJan,flightArrFeb,flightArrMar,flightArrApr,flightArrMay,flightArrJun,flightArrJul,flightArrAug,flightArrSep,flightArrOct,flightArrNov,flightArrDec)
+
+departure <- rbind(flightDepJan,flightDepFeb,flightDepMar,flightDepApr,flightDepMay,flightDepJun,flightDepJul,flightDepAug,flightDepSep,flightDepOct,flightDepNov,flightDepDec)
+rm(flightDepJan,flightDepFeb,flightDepMar,flightDepApr,flightDepMay,flightDepJun,flightDepJul,flightDepAug,flightDepSep,flightDepOct,flightDepNov,flightDepDec)
+```
+
+# join weather and flight data
+``` {r }
+weather.origin <- weather %>%
+  rename(MONTH = month, DAY_OF_MONTH = date, ORIGIN = airport)
+
+weather.dest <- weather %>%
+  rename(MONTH = month, DAY_OF_MONTH = date, DEST = airport)
+
+dat.arrival <- merge(arrival, weather.origin, by=c("MONTH","DAY_OF_MONTH","ORIGIN"))
+idx <- which(names(dat.arrival) == "temp.avg")
+dat.arrival <- dat.arrival %>%
+  rename_at(vars(idx:length(names(dat.arrival))), ~paste0("origin_",.))
+
+dat.arrival <- merge(dat.arrival, weather.dest, by=c("MONTH","DAY_OF_MONTH","DEST"))
+idx <- which(names(dat.arrival) == "temp.avg")
+dat.arrival <- dat.arrival %>%
+  rename_at(vars(idx:length(names(dat.arrival))), ~paste0("dest_",.))
+
+dat.departure <- merge(departure, weather.origin, by=c("MONTH","DAY_OF_MONTH","ORIGIN"))
+idx <- which(names(dat.departure) == "temp.avg")
+dat.departure <- dat.departure %>%
+  rename_at(vars(idx:length(names(dat.departure))), ~paste0("origin_",.))
+
+dat.departure <- merge(dat.departure, weather.dest, by=c("MONTH","DAY_OF_MONTH","DEST"))
+idx <- which(names(dat.departure) == "temp.avg")
+dat.departure <- dat.departure %>%
+  rename_at(vars(idx:length(names(dat.departure))), ~paste0("dest_",.))
+```
+
+# export 
+``` {r }
+write.csv(dat.arrival, file = "arrival.csv", row.names = FALSE)
+write.csv(dat.departure, file = "departure.csv", row.names = FALSE)
+```
+
+
+
+
